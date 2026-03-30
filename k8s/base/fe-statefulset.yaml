@@ -1,0 +1,256 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: doris-fe-config
+  namespace: doris
+data:
+  fe.conf: |
+    # Frontend Configuration for Doris 4.0.4
+    
+    # Network
+    http_port = 8030
+    rpc_port = 9020
+    query_port = 9030
+    edit_log_port = 9010
+    
+    # High Availability
+    edit_log_type = BDB
+    metadata_failure_recovery = false
+    
+    # Memory
+    JAVA_OPTS = "-Xmx16384m -Xms16384m -XX:+UseG1GC -XX:MaxGCPauseMillis=200"
+    mem_limit = 34359738368
+    
+    # Storage
+    meta_dir = /opt/doris/fe/doris-meta
+    
+    # Meta Service Connection
+    meta_service_endpoint = doris-ms:8080
+    
+    # Cloud Storage
+    enable_cloud_storage = true
+    cloud_storage_type = GCS
+    gcs_bucket = doris-data-bucket
+    
+    # Query Optimization
+    max_query_instances = 128
+    default_max_filter_ratio = 0.1
+    
+    # Cache
+    enable_query_cache = true
+    query_cache_size = 2147483648
+    
+    # Log
+    log_dir = /opt/doris/fe/log
+    sys_log_level = INFO
+    sys_log_roll_num = 10
+    sys_log_verbose_modules = org.apache.doris
+    
+    # Performance
+    tablet_repair_delay_time_second = 60
+    max_bdbje_clock_delta_ms = 5000
+    
+    # Disaggregated Mode
+    disagg_storage = true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: doris-fe-headless
+  namespace: doris
+  labels:
+    app: doris-fe
+spec:
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    app: doris-fe
+  ports:
+  - name: http
+    port: 8030
+    targetPort: 8030
+  - name: rpc
+    port: 9020
+    targetPort: 9020
+  - name: query
+    port: 9030
+    targetPort: 9030
+  - name: edit-log
+    port: 9010
+    targetPort: 9010
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: doris-fe
+  namespace: doris
+  labels:
+    app: doris-fe
+spec:
+  type: ClusterIP
+  selector:
+    app: doris-fe
+  ports:
+  - name: http
+    port: 8030
+    targetPort: 8030
+  - name: rpc
+    port: 9020
+    targetPort: 9020
+  - name: query
+    port: 9030
+    targetPort: 9030
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: doris-fe-external
+  namespace: doris
+  labels:
+    app: doris-fe
+spec:
+  type: LoadBalancer
+  selector:
+    app: doris-fe
+  ports:
+  - name: mysql
+    port: 9030
+    targetPort: 9030
+  - name: http
+    port: 8030
+    targetPort: 8030
+  annotations:
+    cloud.google.com/load-balancer-type: "Internal"
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: doris-fe
+  namespace: doris
+  labels:
+    app: doris-fe
+spec:
+  serviceName: doris-fe-headless
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: doris-fe
+  template:
+    metadata:
+      labels:
+        app: doris-fe
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8030"
+        prometheus.io/path: "/metrics"
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels:
+                app: doris-fe
+            topologyKey: topology.kubernetes.io/zone
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: component
+                operator: In
+                values:
+                - fe
+      terminationGracePeriodSeconds: 120
+      initContainers:
+      - name: wait-for-ms
+        image: busybox:1.36
+        command: ['sh', '-c', 'until nc -z doris-ms 8080; do echo waiting for meta service; sleep 2; done']
+      containers:
+      - name: frontend
+        image: apache/doris:fe-4.0.4
+        imagePullPolicy: IfNotPresent
+        command:
+        - /bin/bash
+        - -c
+        - |
+          FE_ID=$(echo $HOSTNAME | sed 's/doris-fe-//')
+          
+          if [ "$FE_ID" = "0" ]; then
+            /opt/doris/fe/bin/start_fe.sh --daemon
+          else
+            /opt/doris/fe/bin/start_fe.sh --helper doris-fe-0.doris-fe-headless.doris.svc.cluster.local:9010 --daemon
+          fi
+          
+          tail -f /opt/doris/fe/log/fe.log
+        ports:
+        - name: http
+          containerPort: 8030
+        - name: rpc
+          containerPort: 9020
+        - name: query
+          containerPort: 9030
+        - name: edit-log
+          containerPort: 9010
+        env:
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: FE_SERVER
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        resources:
+          requests:
+            cpu: "8"
+            memory: "32Gi"
+          limits:
+            cpu: "8"
+            memory: "32Gi"
+        volumeMounts:
+        - name: fe-meta
+          mountPath: /opt/doris/fe/doris-meta
+        - name: fe-log
+          mountPath: /opt/doris/fe/log
+        - name: gcs-credentials
+          mountPath: /opt/doris/gcs
+          readOnly: true
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: 8030
+          initialDelaySeconds: 60
+          periodSeconds: 15
+          timeoutSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: 8030
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+      volumes:
+      - name: gcs-credentials
+        secret:
+          secretName: doris-gcs-secret
+  volumeClaimTemplates:
+  - metadata:
+      name: fe-meta
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      storageClassName: "standard-rwo"
+      resources:
+        requests:
+          storage: 100Gi
+  - metadata:
+      name: fe-log
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      storageClassName: "standard-rwo"
+      resources:
+        requests:
+          storage: 20Gi

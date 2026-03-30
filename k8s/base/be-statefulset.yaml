@@ -1,0 +1,242 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: doris-be-config
+  namespace: doris
+data:
+  be.conf: |
+    # Backend Configuration for Doris 4.0.4
+    
+    # Network
+    be_port = 9060
+    webserver_port = 8040
+    heartbeat_service_port = 9050
+    brpc_port = 8060
+    
+    # Storage
+    storage_root_path = /opt/doris/be/storage
+    
+    # Cloud Storage (Disaggregated Mode)
+    enable_cloud_storage = true
+    cloud_storage_type = GCS
+    gcs_bucket = doris-data-bucket
+    gcs_endpoint = https://storage.googleapis.com
+    
+    # Cache Configuration
+    enable_datacache = true
+    datacache_path = /opt/doris/be/cache
+    datacache_size = 1073741824000
+    
+    # Memory
+    mem_limit = 137438953472
+    
+    # Performance
+    num_threads_per_core = 2
+    scan_thread_pool_thread_num = 48
+    send_thread_pool_thread_num = 16
+    make_snapshot_thread_pool_thread_num = 16
+    release_snapshot_thread_pool_thread_num = 16
+    
+    # Compaction
+    base_compaction_num_threads_per_disk = 4
+    cumulative_compaction_num_threads_per_disk = 4
+    compaction_task_num_per_disk = 8
+    cumulative_compaction_check_interval_seconds = 1
+    
+    # Rowset
+    row_nums_check_interval_seconds = 10
+    
+    # Log
+    log_dir = /opt/doris/be/log
+    sys_log_level = INFO
+    sys_log_roll_num = 10
+    
+    # Disaggregated Mode
+    disagg_storage = true
+    meta_service_endpoint = doris-ms:8080
+    
+    # High Availability
+    heartbeat_interval_second = 5
+    max_heartbeat_failure = 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: doris-be-headless
+  namespace: doris
+  labels:
+    app: doris-be
+spec:
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    app: doris-be
+  ports:
+  - name: be
+    port: 9060
+    targetPort: 9060
+  - name: webserver
+    port: 8040
+    targetPort: 8040
+  - name: heartbeat
+    port: 9050
+    targetPort: 9050
+  - name: brpc
+    port: 8060
+    targetPort: 8060
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: doris-be
+  namespace: doris
+  labels:
+    app: doris-be
+spec:
+  type: ClusterIP
+  selector:
+    app: doris-be
+  ports:
+  - name: be
+    port: 9060
+    targetPort: 9060
+  - name: webserver
+    port: 8040
+    targetPort: 8040
+  - name: brpc
+    port: 8060
+    targetPort: 8060
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: doris-be
+  namespace: doris
+  labels:
+    app: doris-be
+spec:
+  serviceName: doris-be-headless
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: doris-be
+  template:
+    metadata:
+      labels:
+        app: doris-be
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8040"
+        prometheus.io/path: "/metrics"
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app: doris-be
+              topologyKey: topology.kubernetes.io/zone
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: component
+                operator: In
+                values:
+                - be
+      terminationGracePeriodSeconds: 300
+      initContainers:
+      - name: wait-for-fe
+        image: busybox:1.36
+        command: ['sh', '-c', 'until nc -z doris-fe 9030; do echo waiting for frontend; sleep 2; done']
+      containers:
+      - name: backend
+        image: apache/doris:be-4.0.4
+        imagePullPolicy: IfNotPresent
+        command:
+        - /bin/bash
+        - -c
+        - |
+          /opt/doris/be/bin/start_be.sh --daemon
+          tail -f /opt/doris/be/log/be.INFO
+        ports:
+        - name: be
+          containerPort: 9060
+        - name: webserver
+          containerPort: 8040
+        - name: heartbeat
+          containerPort: 9050
+        - name: brpc
+          containerPort: 8060
+        env:
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        resources:
+          requests:
+            cpu: "16"
+            memory: "128Gi"
+          limits:
+            cpu: "16"
+            memory: "128Gi"
+        volumeMounts:
+        - name: be-storage
+          mountPath: /opt/doris/be/storage
+        - name: be-cache
+          mountPath: /opt/doris/be/cache
+        - name: be-log
+          mountPath: /opt/doris/be/log
+        - name: gcs-credentials
+          mountPath: /opt/doris/gcs
+          readOnly: true
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8040
+          initialDelaySeconds: 60
+          periodSeconds: 15
+          timeoutSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8040
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+      volumes:
+      - name: gcs-credentials
+        secret:
+          secretName: doris-gcs-secret
+  volumeClaimTemplates:
+  - metadata:
+      name: be-storage
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      storageClassName: "standard-rwo"
+      resources:
+        requests:
+          storage: 100Gi
+  - metadata:
+      name: be-cache
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      storageClassName: "local-nvme"
+      resources:
+        requests:
+          storage: 2Ti
+  - metadata:
+      name: be-log
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      storageClassName: "standard-rwo"
+      resources:
+        requests:
+          storage: 20Gi

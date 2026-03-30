@@ -1,0 +1,216 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: doris-ms-config
+  namespace: doris
+data:
+  meta_service.conf: |
+    # Meta Service Configuration for Doris 4.0.4
+    
+    # Network
+    brpc_port = 8080
+    
+    # Storage
+    meta_dir = /opt/doris/ms/meta
+    
+    # GCS Configuration
+    cloud_storage_type = GCS
+    gcs_bucket = doris-data-bucket
+    gcs_endpoint = https://storage.googleapis.com
+    
+    # Raft Configuration
+    raft_port = 9010
+    raft_data_dir = /opt/doris/ms/raft
+    
+    # High Availability
+    raft_snapshot_interval = 300
+    raft_election_timeout = 5000
+    raft_heartbeat_interval = 1000
+    
+    # Performance
+    thread_pool_size = 16
+    max_background_jobs = 8
+    
+    # Log
+    log_dir = /opt/doris/ms/log
+    log_level = INFO
+    log_size_limit = 1073741824
+    log_num_limit = 10
+    
+    # Memory
+    memory_limitation = 8589934592
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: doris-ms-headless
+  namespace: doris
+  labels:
+    app: doris-ms
+spec:
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    app: doris-ms
+  ports:
+  - name: brpc
+    port: 8080
+    targetPort: 8080
+  - name: raft
+    port: 9010
+    targetPort: 9010
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: doris-ms
+  namespace: doris
+  labels:
+    app: doris-ms
+spec:
+  type: ClusterIP
+  selector:
+    app: doris-ms
+  ports:
+  - name: brpc
+    port: 8080
+    targetPort: 8080
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: doris-ms
+  namespace: doris
+  labels:
+    app: doris-ms
+spec:
+  serviceName: doris-ms-headless
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: doris-ms
+  template:
+    metadata:
+      labels:
+        app: doris-ms
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels:
+                app: doris-ms
+            topologyKey: topology.kubernetes.io/zone
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: component
+                operator: In
+                values:
+                - ms
+      terminationGracePeriodSeconds: 60
+      containers:
+      - name: meta-service
+        image: apache/doris:ms-4.0.4
+        imagePullPolicy: IfNotPresent
+        command:
+        - /bin/bash
+        - -c
+        - |
+          MS_HOSTNAME=$(hostname -f)
+          MS_ID=$(echo $HOSTNAME | sed 's/doris-ms-//')
+          
+          if [ "$MS_ID" = "0" ]; then
+            /opt/doris/ms/bin/start_meta_service.sh \
+              --meta_service_port=8080 \
+              --raft_port=9010 \
+              --meta_dir=/opt/doris/ms/meta \
+              --raft_data_dir=/opt/doris/ms/raft \
+              --cloud_storage_type=GCS \
+              --gcs_bucket=doris-data-bucket
+          else
+            /opt/doris/ms/bin/start_meta_service.sh \
+              --meta_service_port=8080 \
+              --raft_port=9010 \
+              --meta_dir=/opt/doris/ms/meta \
+              --raft_data_dir=/opt/doris/ms/raft \
+              --cloud_storage_type=GCS \
+              --gcs_bucket=doris-data-bucket \
+              --join_cluster=doris-ms-0.doris-ms-headless.doris.svc.cluster.local:9010
+          fi
+        ports:
+        - name: brpc
+          containerPort: 8080
+        - name: raft
+          containerPort: 9010
+        env:
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        resources:
+          requests:
+            cpu: "4"
+            memory: "16Gi"
+          limits:
+            cpu: "4"
+            memory: "16Gi"
+        volumeMounts:
+        - name: ms-meta
+          mountPath: /opt/doris/ms/meta
+        - name: ms-raft
+          mountPath: /opt/doris/ms/raft
+        - name: ms-log
+          mountPath: /opt/doris/ms/log
+        - name: gcs-credentials
+          mountPath: /opt/doris/gcs
+          readOnly: true
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+      volumes:
+      - name: gcs-credentials
+        secret:
+          secretName: doris-gcs-secret
+  volumeClaimTemplates:
+  - metadata:
+      name: ms-meta
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      storageClassName: "standard-rwo"
+      resources:
+        requests:
+          storage: 50Gi
+  - metadata:
+      name: ms-raft
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      storageClassName: "standard-rwo"
+      resources:
+        requests:
+          storage: 20Gi
+  - metadata:
+      name: ms-log
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      storageClassName: "standard-rwo"
+      resources:
+        requests:
+          storage: 10Gi

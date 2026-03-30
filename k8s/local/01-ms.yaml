@@ -1,0 +1,148 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: doris-ms-config
+  namespace: doris
+data:
+  meta_service.conf: |
+    brpc_port = 8080
+    meta_dir = /opt/doris/ms/meta
+    cloud_storage_type = S3
+    s3_endpoint = http://minio:9000
+    s3_region = us-east-1
+    s3_bucket = doris-data
+    s3_access_key = minioadmin
+    s3_secret_key = minioadmin
+    s3_path_style_access = true
+    raft_port = 9010
+    raft_data_dir = /opt/doris/ms/raft
+    raft_snapshot_interval = 300
+    raft_election_timeout = 5000
+    raft_heartbeat_interval = 1000
+    thread_pool_size = 4
+    max_background_jobs = 4
+    log_dir = /opt/doris/ms/log
+    log_level = INFO
+    memory_limitation = 2147483648
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: doris-ms-headless
+  namespace: doris
+  labels:
+    app: doris-ms
+spec:
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    app: doris-ms
+  ports:
+  - name: brpc
+    port: 8080
+    targetPort: 8080
+  - name: raft
+    port: 9010
+    targetPort: 9010
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: doris-ms
+  namespace: doris
+  labels:
+    app: doris-ms
+spec:
+  type: ClusterIP
+  selector:
+    app: doris-ms
+  ports:
+  - name: brpc
+    port: 8080
+    targetPort: 8080
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: doris-ms
+  namespace: doris
+  labels:
+    app: doris-ms
+spec:
+  serviceName: doris-ms-headless
+  replicas: 1
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: doris-ms
+  template:
+    metadata:
+      labels:
+        app: doris-ms
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+      - name: meta-service
+        image: apache/doris:ms-4.0.4
+        imagePullPolicy: IfNotPresent
+        command:
+        - /bin/bash
+        - -c
+        - |
+          /opt/doris/ms/bin/start_meta_service.sh \
+            --meta_service_port=8080 \
+            --raft_port=9010 \
+            --meta_dir=/opt/doris/ms/meta \
+            --raft_data_dir=/opt/doris/ms/raft \
+            --cloud_storage_type=S3 \
+            --s3_endpoint=http://minio:9000 \
+            --s3_region=us-east-1 \
+            --s3_bucket=doris-data \
+            --s3_access_key=minioadmin \
+            --s3_secret_key=minioadmin \
+            --s3_path_style_access=true
+        ports:
+        - name: brpc
+          containerPort: 8080
+        - name: raft
+          containerPort: 9010
+        env:
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "2Gi"
+          limits:
+            cpu: "1"
+            memory: "4Gi"
+        volumeMounts:
+        - name: ms-meta
+          mountPath: /opt/doris/ms/meta
+        - name: ms-raft
+          mountPath: /opt/doris/ms/raft
+        - name: ms-log
+          mountPath: /opt/doris/ms/log
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+      volumes:
+      - name: ms-meta
+        emptyDir: {}
+      - name: ms-raft
+        emptyDir: {}
+      - name: ms-log
+        emptyDir: {}

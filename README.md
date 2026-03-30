@@ -1,2 +1,0 @@
-# doris-disaggregated
-doris-disaggregated

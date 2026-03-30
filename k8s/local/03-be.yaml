@@ -1,0 +1,145 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: doris-be-config
+  namespace: doris
+data:
+  be.conf: |
+    be_port = 9060
+    webserver_port = 8040
+    heartbeat_service_port = 9050
+    brpc_port = 8060
+    priority_networks = 10.0.0.0/8
+    storage_root_path = /opt/apache-doris/be/storage
+    mem_limit = 8589934592
+    log_dir = /opt/apache-doris/be/log
+    sys_log_level = INFO
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: doris-be-headless
+  namespace: doris
+  labels:
+    app: doris-be
+spec:
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    app: doris-be
+  ports:
+  - name: be
+    port: 9060
+    targetPort: 9060
+  - name: webserver
+    port: 8040
+    targetPort: 8040
+  - name: heartbeat
+    port: 9050
+    targetPort: 9050
+  - name: brpc
+    port: 8060
+    targetPort: 8060
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: doris-be
+  namespace: doris
+  labels:
+    app: doris-be
+spec:
+  type: ClusterIP
+  selector:
+    app: doris-be
+  ports:
+  - name: be
+    port: 9060
+    targetPort: 9060
+  - name: webserver
+    port: 8040
+    targetPort: 8040
+  - name: brpc
+    port: 8060
+    targetPort: 8060
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: doris-be
+  namespace: doris
+  labels:
+    app: doris-be
+spec:
+  serviceName: doris-be-headless
+  replicas: 1
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: doris-be
+  template:
+    metadata:
+      labels:
+        app: doris-be
+    spec:
+      terminationGracePeriodSeconds: 60
+      initContainers:
+      - name: wait-for-fe
+        image: busybox:1.36
+        command: ['sh', '-c', 'until nc -z doris-fe 9030; do echo waiting for frontend; sleep 2; done']
+      containers:
+      - name: backend
+        image: apache/doris:be-4.0.4
+        imagePullPolicy: Never
+        command:
+        - /bin/bash
+        - -c
+        - |
+          /opt/apache-doris/be/bin/start_be.sh --daemon
+          sleep 10
+          tail -f /opt/apache-doris/be/log/be.INFO
+        ports:
+        - name: be
+          containerPort: 9060
+        - name: webserver
+          containerPort: 8040
+        - name: heartbeat
+          containerPort: 9050
+        - name: brpc
+          containerPort: 8060
+        env:
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        resources:
+          requests:
+            cpu: "1"
+            memory: "4Gi"
+          limits:
+            cpu: "2"
+            memory: "8Gi"
+        volumeMounts:
+        - name: be-storage
+          mountPath: /opt/apache-doris/be/storage
+        - name: be-log
+          mountPath: /opt/apache-doris/be/log
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8040
+          initialDelaySeconds: 90
+          periodSeconds: 15
+          timeoutSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8040
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          timeoutSeconds: 5
+      volumes:
+      - name: be-storage
+        emptyDir: {}
+      - name: be-log
+        emptyDir: {}

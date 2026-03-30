@@ -1,0 +1,142 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: doris-fe-config
+  namespace: doris
+data:
+  fe.conf: |
+    http_port = 8030
+    rpc_port = 9020
+    query_port = 9030
+    edit_log_port = 9010
+    edit_log_type = BDB
+    priority_networks = 10.0.0.0/8
+    JAVA_OPTS = "-Xmx2048m -Xms2048m -XX:+UseG1GC"
+    meta_dir = /opt/apache-doris/fe/doris-meta
+    log_dir = /opt/apache-doris/fe/log
+    sys_log_level = INFO
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: doris-fe-headless
+  namespace: doris
+  labels:
+    app: doris-fe
+spec:
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    app: doris-fe
+  ports:
+  - name: http
+    port: 8030
+    targetPort: 8030
+  - name: rpc
+    port: 9020
+    targetPort: 9020
+  - name: query
+    port: 9030
+    targetPort: 9030
+  - name: edit-log
+    port: 9010
+    targetPort: 9010
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: doris-fe
+  namespace: doris
+  labels:
+    app: doris-fe
+spec:
+  type: ClusterIP
+  selector:
+    app: doris-fe
+  ports:
+  - name: http
+    port: 8030
+    targetPort: 8030
+  - name: rpc
+    port: 9020
+    targetPort: 9020
+  - name: query
+    port: 9030
+    targetPort: 9030
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: doris-fe
+  namespace: doris
+  labels:
+    app: doris-fe
+spec:
+  serviceName: doris-fe-headless
+  replicas: 1
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: doris-fe
+  template:
+    metadata:
+      labels:
+        app: doris-fe
+    spec:
+      terminationGracePeriodSeconds: 60
+      containers:
+      - name: frontend
+        image: apache/doris:fe-4.0.4
+        imagePullPolicy: Never
+        command:
+        - /bin/bash
+        - -c
+        - |
+          /opt/apache-doris/fe/bin/start_fe.sh --daemon
+          sleep 10
+          tail -f /opt/apache-doris/fe/log/fe.log
+        ports:
+        - name: http
+          containerPort: 8030
+        - name: rpc
+          containerPort: 9020
+        - name: query
+          containerPort: 9030
+        - name: edit-log
+          containerPort: 9010
+        env:
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "2Gi"
+          limits:
+            cpu: "1"
+            memory: "4Gi"
+        volumeMounts:
+        - name: fe-meta
+          mountPath: /opt/apache-doris/fe/doris-meta
+        - name: fe-log
+          mountPath: /opt/apache-doris/fe/log
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: 8030
+          initialDelaySeconds: 90
+          periodSeconds: 15
+          timeoutSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: 8030
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          timeoutSeconds: 5
+      volumes:
+      - name: fe-meta
+        emptyDir: {}
+      - name: fe-log
+        emptyDir: {}
