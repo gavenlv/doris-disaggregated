@@ -1,0 +1,53 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: doris-ms-config
+  namespace: doris
+data:
+  fdb_cluster: |
+    doris:doris@foundationdb.doris.svc.cluster.local:4500
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: doris-fe-config
+  namespace: doris
+data:
+  fe.conf: |
+    JAVA_OPTS=-Xmx4g -XX:+UseG1GC -XX:MaxGCPauseMillis=200
+    sys_log_dir=/opt/apache-doris/fe/log
+    fe_server_threads=16
+    fe_catalog_threads=8
+    run_mode=disagg
+    meta_service_endpoint=doris-meta-service.doris.svc.cluster.local:5000
+    cloud_unique_id=1:doris_instance:cloud_unique_id_fe00
+    instance_id=doris_instance
+    enable_join_spill=false
+    enable_agg_spill=false
+    enable_mow=true
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: doris-be-config
+  namespace: doris
+data:
+  be.conf: |
+    be_port=9050
+    be_web_server_port=8040
+    thrift_server_port=9060
+    mysql_server_port=9030
+    arrow_flight_sql_port=9040
+    max_runtime_memory=4g
+    read_content_size=1048576
+    be_log_dir=/opt/apache-doris/be/log
+    sys_log_dir=/opt/apache-doris/be/log
+    log_reviewer_type=limited
+    run_mode=disagg
+    meta_service_endpoint=doris-meta-service.doris.svc.cluster.local:5000
+    cloud_unique_id=1:doris_instance:cloud_unique_id_be00
+    instance_id=doris_instance
+    cluster_name=cg1
+    enable_file_cache=true
+    file_cache_path=[{"path":"/opt/apache-doris/be/file_cache","total_size":10737418240,"query_limit":1073741824}]
+    storage_root_path=/opt/apache-doris/be/storage

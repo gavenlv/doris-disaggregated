@@ -1,0 +1,71 @@
+apiVersion: disaggregated.cluster.doris.com/v1
+kind: DorisDisaggregatedCluster
+metadata:
+  name: doris-disaggregated
+  namespace: doris
+  labels:
+    app: doris-disaggregated
+spec:
+  enableFEPDBMode: false
+  metaService:
+    image: apache/doris:ms-4.0.4
+    replicas: 2
+    fdb:
+      address: "doris-fdb:4500"
+      clusterFilePath: "/var/lib/foundationdb/fdb.cluster"
+      credentialsSecret: "fdb-credentials"
+    requests:
+      cpu: "1"
+      memory: "2Gi"
+    limits:
+      cpu: "2"
+      memory: "4Gi"
+  feSpec:
+    image: apache/doris:fe-4.0.4
+    replicas: 3
+    configMapInfo:
+      configMapName: doris-fe-config
+      resolveKey: fe.conf
+    requests:
+      cpu: "2"
+      memory: "4Gi"
+    limits:
+      cpu: "4"
+      memory: "8Gi"
+    affinity:
+      podAntiAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - doris-disaggregated-fe
+            topologyKey: kubernetes.io/hostname
+  computeGroups:
+  - uniqueId: cg1
+    image: apache/doris:be-4.0.4
+    replicas: 3
+    configMapInfo:
+      configMapName: doris-be-config
+      resolveKey: be.conf
+    requests:
+      cpu: "2"
+      memory: "4Gi"
+    limits:
+      cpu: "4"
+      memory: "8Gi"
+    affinity:
+      podAntiAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - doris-disaggregated-cg1
+            topologyKey: kubernetes.io/hostname

@@ -275,18 +275,17 @@ kubectl exec $MINIO_POD -n doris -- /bin/bash -c 'mc alias set myminio http://lo
 |------|------|--------|------|
 | Doris FE (MySQL) | 127.0.0.1:9030 | root | (空) |
 | Doris FE (HTTP) | 127.0.0.1:8030 | root | (空) |
-| Meta Service API | 127.0.0.1:8080 | token | greedisgood9999 |
+| Meta Service API | 127.0.0.1:5000 | token | greedisgood9999 |
 | MinIO Console | http://127.0.0.1:9001 | minioadmin | minioadmin |
 | MinIO S3 API | 127.0.0.1:9000 | minioadmin | minioadmin |
 
 ## Meta Service API 常用操作
 
 ```powershell
-$MS_URL = "http://127.0.0.1:8080"
+$MS_URL = "http://127.0.0.1:5000"
 $TOKEN = "greedisgood9999"
 
 # 查看 Instance 信息
-kubectl port-forward svc/doris-ms 8080:8080 -n doris
 curl "${MS_URL}/MetaService/http/get_instance?instance_id=doris_instance&token=${TOKEN}"
 
 # 查看 Cluster 信息
@@ -344,6 +343,106 @@ FE 和 BE 启动时会自动：
 
 这解决了 Pod 重启后 IP 变化导致注册信息失效的问题。
 
+## Operator 部署方式（推荐）
+
+除了手动部署，推荐使用 Doris Operator 进行存算分离集群管理。Operator 提供了声明式的集群管理能力。
+
+### 前置条件
+
+```powershell
+# 确保本地有 Operator 镜像
+docker images | Select-String "operator"
+# apache/doris:operator-25.8.0
+```
+
+### 部署步骤
+
+```powershell
+# 0. 创建命名空间
+kubectl create namespace doris
+
+# 1. 部署 FoundationDB（手动 StatefulSet）
+kubectl apply -f k8s/operator-disaggregated/01-fdb-manual.yaml
+kubectl wait --for=condition=ready pod -l app=foundationdb -n doris --timeout=120s
+
+# 2. 部署 MinIO
+kubectl apply -f k8s/operator-disaggregated/07-minio.yaml
+kubectl wait --for=condition=ready pod -l app=minio -n doris --timeout=120s
+
+# 3. 部署 Doris Operator
+kubectl apply -f k8s/operator-disaggregated/02-doris-operator.yaml
+kubectl wait --for=condition=ready pod -l app=doris-operator -n doris --timeout=120s
+
+# 4. 部署 ConfigMap（FE/BE/MS 配置和 FDB 集群配置）
+kubectl apply -f k8s/operator-disaggregated/03-ms-configmap.yaml `
+              -f k8s/operator-disaggregated/10-fdb-configmap.yaml `
+              -f k8s/operator-disaggregated/04-fe-configmap.yaml `
+              -f k8s/operator-disaggregated/05-be-configmap.yaml
+
+# 5. 部署 Doris 存算分离集群 CRD
+kubectl apply -f k8s/operator-disaggregated/08-doris-disaggregated-cluster.yaml
+
+# 6. 等待集群就绪（约 2-3 分钟）
+kubectl wait --for=condition=ready pod -l app=doris-disaggregated-fe -n doris --timeout=300s
+kubectl wait --for=condition=ready pod -l app=doris-disaggregated-cg1 -n doris --timeout=300s
+```
+
+### 启动端口转发
+
+```powershell
+# FE (HTTP:8030, MySQL:9030)
+Start-Process -FilePath "kubectl" -ArgumentList "port-forward","-n","doris","svc/doris-disaggregated-fe","8030:8030","9030:9030" -WindowStyle Hidden
+
+# MinIO (S3:9000, Console:9001)
+Start-Process -FilePath "kubectl" -ArgumentList "port-forward","-n","doris","svc/minio","9000:9000","9001:9001" -WindowStyle Hidden
+
+# Meta Service (API:5000)
+Start-Process -FilePath "kubectl" -ArgumentList "port-forward","-n","doris","svc/doris-disaggregated-ms","5000:5000" -WindowStyle Hidden
+```
+
+### 创建 Storage Vault（关键步骤）
+
+**重要**: 在 Doris 4.0.4 中创建 Storage Vault 时，必须指定 `provider` 属性，否则会报错 "s3 conf lease provider info"。
+
+```sql
+-- 连接 FE
+kubectl exec -it doris-disaggregated-fe-0 -n doris -- mysql -h 127.0.0.1 -P 9030 -u root
+
+-- 创建 Storage Vault（注意 provider='S3' 是必需的）
+CREATE STORAGE VAULT IF NOT EXISTS minio_vault
+PROPERTIES (
+    'type'='S3',
+    's3.endpoint'='http://minio.doris.svc.cluster.local:9000',
+    's3.region'='us-east-1',
+    's3.bucket'='doris',
+    's3.root.path'='doris-data',
+    's3.access_key'='minioadmin',
+    's3.secret_key'='minioadmin',
+    's3.use_path_style'='true',
+    's3.enable_ssl'='false',
+    'provider'='S3'
+);
+
+-- 设置为默认 Storage Vault
+SET minio_vault AS DEFAULT STORAGE VAULT;
+
+-- 验证
+SHOW STORAGE VAULT;
+```
+
+### provider 属性说明
+
+`provider` 属性必须是以下值之一：
+- `S3` - Amazon S3 或 S3 兼容存储（如 MinIO）
+- `OSS` - 阿里云 OSS
+- `OBS` - 华为云 OBS
+- `COS` - 腾讯云 COS
+- `BOS` - 百度云 BOS
+- `AZURE` - Azure Blob Storage
+- `GCP` - Google Cloud Storage
+
+对于 MinIO，使用 `provider='S3'` 即可。
+
 ## 常见问题
 
 ### 1. Meta Service 启动失败
@@ -359,11 +458,27 @@ kubectl logs <ms-pod> -n doris -c meta-service --tail=50
 ### 2. FE 报 "No default storage vault"
 
 ```sql
--- 在 FE 中执行
-SET built_in_storage_vault AS DEFAULT STORAGE VAULT;
+-- 查看 Storage Vault
+SHOW STORAGE VAULT;
+
+-- 设置默认
+SET <vault_name> AS DEFAULT STORAGE VAULT;
 ```
 
-### 3. BE 无法连接到 Meta Service
+### 3. 创建 Storage Vault 报错 "s3 conf lease provider info"
+
+**原因**: 缺少 `provider` 属性。
+
+**解决方案**: 在 PROPERTIES 中添加 `'provider'='S3'`。
+
+```sql
+CREATE STORAGE VAULT minio_vault PROPERTIES (
+    ...
+    'provider'='S3'  -- 必须添加此属性
+);
+```
+
+### 4. BE 无法连接到 Meta Service
 
 ```powershell
 # 检查 BE 日志
@@ -373,7 +488,7 @@ kubectl logs doris-be-0 -n doris --tail=50
 kubectl exec doris-be-0 -n doris -- curl -s http://doris-ms:8080/MetaService/http/health
 ```
 
-### 4. Pod IP 变化导致注册失效
+### 5. Pod IP 变化导致注册失效
 
 FE/BE 已内置自动注册逻辑，Pod 重启后会自动使用新 IP 重新注册。如需手动更新：
 
@@ -385,6 +500,17 @@ $BE_IP = kubectl get pod doris-be-0 -n doris -o jsonpath='{.status.podIP}'
 curl -X POST "http://127.0.0.1:8080/MetaService/http/add_cluster?token=greedisgood9999" `
   -H "Content-Type: application/json" `
   -d "{...}"
+```
+
+### 6. MinIO 连接问题
+
+```powershell
+# 验证 MinIO S3 兼容性
+kubectl exec -it <minio-pod> -n doris -- mc alias set local http://localhost:9000 minioadmin minioadmin
+kubectl exec -it <minio-pod> -n doris -- mc ls local
+
+# 从 FE 测试 MinIO 连接
+kubectl exec -it <fe-pod> -n doris -- curl -I http://minio.doris.svc.cluster.local:9000
 ```
 
 ## 清理资源

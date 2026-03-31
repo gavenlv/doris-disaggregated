@@ -1,0 +1,60 @@
+apiVersion: apps.foundationdb.org/v1beta2
+kind: FoundationDBCluster
+metadata:
+  name: doris-fdb
+  namespace: doris
+  labels:
+    app: foundationdb
+    disaggregated.doris.com/component: fdb
+spec:
+  version: 7.3.69
+  routing:
+    useDNSInClusterFile: true
+  mainContainer:
+    imageConfigs:
+    - baseImage: foundationdb/foundationdb
+      tag: 7.3.69
+    logGroup: doris-fdb
+    logLevel: Info
+  sidecarContainer:
+    imageConfigs:
+    - baseImage: foundationdb/foundationdb
+      tag: 7.3.69
+  processes:
+    general:
+      podTemplate:
+        spec:
+          containers:
+          - name: foundationdb
+            volumeMounts:
+            - name: data
+              mountPath: /var/lib/foundationdb/data
+            resources:
+              requests:
+                cpu: "1"
+                memory: "4Gi"
+              limits:
+                cpu: "2"
+                memory: "8Gi"
+          - name: foundationdb-kubernetes-sidecar
+            volumeMounts:
+            - name: data
+              mountPath: /var/lib/foundationdb
+          volumes:
+          - name: data
+            emptyDir: {}
+    storage_1:
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+          - ReadWriteOnce
+          storageClassName: standard
+          resources:
+            requests:
+              storage: 50Gi
+  databaseConfiguration:
+    redundancy_mode: single
+    storage_engine: ssd
+  faultDomain:
+    key: kubernetes.io/hostname
+    valueFrom: metadata.name

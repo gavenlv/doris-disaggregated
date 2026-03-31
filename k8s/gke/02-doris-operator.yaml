@@ -1,0 +1,95 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: doris-operator-controller-manager
+  namespace: doris
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: doris-operator-manager-role
+rules:
+- apiGroups: ["apiextensions.k8s.io"]
+  resources: ["customresourceddefinitions"]
+  verbs: ["*"]
+- apiGroups: ["disaggregated.cluster.doris.com"]
+  resources: ["*"]
+  verbs: ["*"]
+- apiGroups: [""]
+  resources: ["pods", "pods/log", "services", "endpoints", "persistentvolumeclaims", "configmaps", "secrets", "serviceaccounts", "events"]
+  verbs: ["*"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+  verbs: ["*"]
+- apiGroups: ["rbac.authorization.k8s.io"]
+  resources: ["roles", "rolebindings", "clusterroles", "clusterrolebindings"]
+  verbs: ["*"]
+- apiGroups: ["policy"]
+  resources: ["poddisruptionbudgets"]
+  verbs: ["*"]
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: doris-operator-manager-rolebinding
+subjects:
+- kind: ServiceAccount
+  name: doris-operator-controller-manager
+  namespace: doris
+roleRef:
+  kind: ClusterRole
+  name: doris-operator-manager-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: doris-operator-controller-manager
+  namespace: doris
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: doris-operator
+  template:
+    metadata:
+      labels:
+        app: doris-operator
+    spec:
+      serviceAccountName: doris-operator-controller-manager
+      containers:
+      - name: manager
+        image: apache/doris:operator-25.8.0
+        imagePullPolicy: IfNotPresent
+        args:
+        - --leader-elect
+        - --health-probe-bind-address=:8081
+        - --metrics-bind-address=127.0.0.1:8080
+        - --webhook-port=9443
+        env:
+        - name: WATCH_NAMESPACE
+          value: ""
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: CONTROLLER_NAME
+          value: "doris-operator-controller-manager"
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        ports:
+        - containerPort: 9443
+          name: webhook
+          protocol: TCP

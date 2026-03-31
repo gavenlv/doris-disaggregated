@@ -1,0 +1,59 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: doris-fe-lb
+  namespace: doris
+  labels:
+    app: doris-fe
+    role: loadbalancer
+  annotations:
+    cloud.google.com/app-protocols: '{"fe-mysql":"TCP","fe-http":"HTTP"}'
+spec:
+  type: LoadBalancer
+  selector:
+    app: doris-disaggregated-fe
+  ports:
+  - name: fe-mysql
+    port: 9030
+    targetPort: 9030
+    protocol: TCP
+  - name: fe-thrift
+    port: 9031
+    targetPort: 9031
+    protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: doris-fe-http
+  namespace: doris
+  labels:
+    app: doris-fe
+    role: loadbalancer
+spec:
+  type: LoadBalancer
+  selector:
+    app: doris-disaggregated-fe
+  ports:
+  - name: fe-http
+    port: 80
+    targetPort: 8030
+    protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: doris-ms-lb
+  namespace: doris
+  labels:
+    app: doris-meta-service
+    role: loadbalancer
+spec:
+  type: LoadBalancer
+  selector:
+    app: doris-meta-service
+  ports:
+  - name: ms-http
+    port: 5000
+    targetPort: 5000
+    protocol: TCP
