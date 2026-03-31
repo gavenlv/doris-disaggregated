@@ -1,0 +1,56 @@
+apiVersion: disaggregated.cluster.doris.com/v1
+kind: DorisDisaggregatedCluster
+metadata:
+  name: doris-disaggregated
+  namespace: doris
+spec:
+  metaService:
+    image: apache/doris:ms-4.0.4
+    fdb:
+      address: "doris:doris@foundationdb.doris.svc.cluster.local:4500"
+    configMaps:
+    - name: doris-ms-config
+      mountPath: /etc/doris
+    - name: fdb-cluster-config
+      mountPath: /etc/foundationdb
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      cpu: "1"
+      memory: "2Gi"
+    liveTimeout: 180
+    startTimeout: 300
+
+  feSpec:
+    image: apache/doris:fe-4.0.4
+    replicas: 1
+    electionNumber: 1
+    configMaps:
+    - name: doris-fe-config
+    requests:
+      cpu: "1"
+      memory: "2Gi"
+    limits:
+      cpu: "2"
+      memory: "4Gi"
+    logNotStore: true
+    service:
+      type: ClusterIP
+
+  computeGroups:
+  - uniqueId: cg1
+    image: apache/doris:be-4.0.4
+    replicas: 1
+    configMaps:
+    - name: doris-be-config
+      mountPath: /etc/doris
+    requests:
+      cpu: "1"
+      memory: "2Gi"
+    limits:
+      cpu: "2"
+      memory: "4Gi"
+    logNotStore: true
+    service:
+      type: ClusterIP

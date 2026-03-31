@@ -1,0 +1,295 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: doris-ms
+  namespace: doris
+  labels:
+    app: doris-ms
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: doris-ms
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: doris-ms
+    spec:
+      terminationGracePeriodSeconds: 30
+      initContainers:
+      - name: wait-for-fdb
+        image: busybox:1.36
+        command:
+        - /bin/sh
+        - -c
+        - |
+          until nc -z foundationdb 4500; do
+            echo "Waiting for foundationdb..."
+            sleep 2
+          done
+          echo "FoundationDB is reachable"
+          sleep 5
+      - name: get-fdb-cluster
+        image: busybox:1.36
+        command:
+        - /bin/sh
+        - -c
+        - |
+          FDB_POD_IP=$(nslookup foundationdb 2>/dev/null | grep -A1 "Name:" | grep "Address" | awk '{print $2}')
+          if [ -z "$FDB_POD_IP" ]; then
+            FDB_POD_IP=$(getent ahosts foundationdb | head -1 | awk '{print $1}')
+          fi
+          if [ -z "$FDB_POD_IP" ]; then
+            FDB_POD_IP=$(cat /etc/resolv.conf | grep nameserver | awk '{print $2}')
+          fi
+          echo "FDB Pod IP: ${FDB_POD_IP}"
+          echo "doris:doris@${FDB_POD_IP}:4500" > /etc/foundationdb/fdb.cluster
+          echo "FDB cluster file: $(cat /etc/foundationdb/fdb.cluster)"
+        volumeMounts:
+        - name: fdb-cluster
+          mountPath: /etc/foundationdb
+      containers:
+      - name: meta-service
+        image: apache/doris:ms-4.0.4
+        imagePullPolicy: Never
+        command:
+        - /bin/bash
+        - -c
+        - |
+          export JAVA_HOME=/usr/lib/jvm/jdk-17
+          export LD_LIBRARY_PATH=$JAVA_HOME/lib/server:$LD_LIBRARY_PATH
+          CONF_DIR=/opt/apache-doris/ms/conf
+          if [ ! -f ${CONF_DIR}/doris_cloud.conf ]; then
+            CONF_DIR=/opt/doris/ms/conf
+          fi
+          MS_BIN=""
+          if [ -f /opt/apache-doris/ms/bin/start.sh ]; then
+            MS_BIN=/opt/apache-doris/ms/bin/start.sh
+          elif [ -f /opt/doris/ms/bin/start.sh ]; then
+            MS_BIN=/opt/doris/ms/bin/start.sh
+          fi
+          if [ -z "$MS_BIN" ]; then
+            echo "ERROR: Cannot find start.sh"
+            ls -la /opt/apache-doris/ms/bin/ 2>/dev/null || true
+            ls -la /opt/doris/ms/bin/ 2>/dev/null || true
+            tail -f /dev/null
+          fi
+          FDB_CLUSTER=$(cat /etc/foundationdb/fdb.cluster 2>/dev/null || echo "")
+          echo "FDB cluster from file: ${FDB_CLUSTER}"
+          if [ -n "$FDB_CLUSTER" ]; then
+            sed -i "s|^fdb_cluster.*|fdb_cluster = ${FDB_CLUSTER}|" ${CONF_DIR}/doris_cloud.conf
+          else
+            FDB_POD_IP=$(getent hosts foundationdb | awk '{print $1}')
+            sed -i "s|^fdb_cluster.*|fdb_cluster = doris:doris@${FDB_POD_IP}:4500|" ${CONF_DIR}/doris_cloud.conf
+          fi
+          sed -i "s|^brpc_listen_port.*|brpc_listen_port = 8080|" ${CONF_DIR}/doris_cloud.conf
+          echo "Final doris_cloud.conf:"
+          cat ${CONF_DIR}/doris_cloud.conf
+          echo "Starting Meta Service..."
+          ${MS_BIN} --meta-service --daemon
+          sleep 10
+          tail -f /opt/apache-doris/ms/log/meta_service.INFO 2>/dev/null || tail -f /opt/doris/ms/log/meta_service.INFO 2>/dev/null || tail -f /dev/null
+        ports:
+        - name: brpc
+          containerPort: 8080
+        env:
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "2Gi"
+          limits:
+            cpu: "1"
+            memory: "4Gi"
+        volumeMounts:
+        - name: ms-meta
+          mountPath: /opt/apache-doris/ms/meta
+        - name: ms-log
+          mountPath: /opt/apache-doris/ms/log
+        - name: fdb-cluster
+          mountPath: /etc/foundationdb
+          readOnly: true
+        livenessProbe:
+          exec:
+            command:
+            - /bin/bash
+            - -c
+            - pgrep -f "doris_cloud" > /dev/null || exit 1
+          initialDelaySeconds: 60
+          periodSeconds: 15
+          timeoutSeconds: 10
+        readinessProbe:
+          exec:
+            command:
+            - /bin/bash
+            - -c
+            - pgrep -f "doris_cloud" > /dev/null || exit 1
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+      volumes:
+      - name: ms-meta
+        emptyDir: {}
+      - name: ms-log
+        emptyDir: {}
+      - name: fdb-cluster
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: doris-ms
+  namespace: doris
+  labels:
+    app: doris-ms
+spec:
+  type: ClusterIP
+  selector:
+    app: doris-ms
+  ports:
+  - name: brpc
+    port: 8080
+    targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: doris-recycler
+  namespace: doris
+  labels:
+    app: doris-recycler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: doris-recycler
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: doris-recycler
+    spec:
+      terminationGracePeriodSeconds: 30
+      initContainers:
+      - name: wait-for-fdb
+        image: busybox:1.36
+        command:
+        - /bin/sh
+        - -c
+        - |
+          until nc -z foundationdb 4500; do
+            echo "Waiting for foundationdb..."
+            sleep 2
+          done
+          echo "FoundationDB is reachable"
+          sleep 5
+      - name: get-fdb-cluster
+        image: busybox:1.36
+        command:
+        - /bin/sh
+        - -c
+        - |
+          FDB_POD_IP=$(nslookup foundationdb 2>/dev/null | grep -A1 "Name:" | grep "Address" | awk '{print $2}')
+          if [ -z "$FDB_POD_IP" ]; then
+            FDB_POD_IP=$(getent ahosts foundationdb | head -1 | awk '{print $1}')
+          fi
+          if [ -z "$FDB_POD_IP" ]; then
+            FDB_POD_IP=$(cat /etc/resolv.conf | grep nameserver | awk '{print $2}')
+          fi
+          echo "FDB Pod IP: ${FDB_POD_IP}"
+          echo "doris:doris@${FDB_POD_IP}:4500" > /etc/foundationdb/fdb.cluster
+          echo "FDB cluster file: $(cat /etc/foundationdb/fdb.cluster)"
+        volumeMounts:
+        - name: fdb-cluster
+          mountPath: /etc/foundationdb
+      containers:
+      - name: recycler
+        image: apache/doris:ms-4.0.4
+        imagePullPolicy: Never
+        command:
+        - /bin/bash
+        - -c
+        - |
+          export JAVA_HOME=/usr/lib/jvm/jdk-17
+          export LD_LIBRARY_PATH=$JAVA_HOME/lib/server:$LD_LIBRARY_PATH
+          CONF_DIR=/opt/apache-doris/ms/conf
+          if [ ! -f ${CONF_DIR}/doris_cloud.conf ]; then
+            CONF_DIR=/opt/doris/ms/conf
+          fi
+          RE_DIR=/opt/apache-doris/re
+          if [ ! -d ${RE_DIR} ]; then
+            RE_DIR=/opt/doris/re
+          fi
+          mkdir -p ${RE_DIR}/conf ${RE_DIR}/log
+          cp ${CONF_DIR}/doris_cloud.conf ${RE_DIR}/conf/ 2>/dev/null || true
+          FDB_CLUSTER=$(cat /etc/foundationdb/fdb.cluster 2>/dev/null || echo "")
+          echo "FDB cluster from file: ${FDB_CLUSTER}"
+          sed -i "s|^brpc_listen_port.*|brpc_listen_port = 5100|" ${RE_DIR}/conf/doris_cloud.conf
+          if [ -n "$FDB_CLUSTER" ]; then
+            sed -i "s|^fdb_cluster.*|fdb_cluster = ${FDB_CLUSTER}|" ${RE_DIR}/conf/doris_cloud.conf
+          else
+            FDB_POD_IP=$(getent hosts foundationdb | awk '{print $1}')
+            sed -i "s|^fdb_cluster.*|fdb_cluster = doris:doris@${FDB_POD_IP}:4500|" ${RE_DIR}/conf/doris_cloud.conf
+          fi
+          MS_BIN=""
+          if [ -f /opt/apache-doris/ms/bin/start.sh ]; then
+            MS_BIN=/opt/apache-doris/ms/bin/start.sh
+          elif [ -f /opt/doris/ms/bin/start.sh ]; then
+            MS_BIN=/opt/doris/ms/bin/start.sh
+          fi
+          if [ -z "$MS_BIN" ]; then
+            echo "ERROR: Cannot find start.sh for recycler"
+            tail -f /dev/null
+          fi
+          echo "Starting Recycler..."
+          ${MS_BIN} --recycler --daemon
+          sleep 10
+          tail -f ${RE_DIR}/log/recycler.INFO 2>/dev/null || tail -f /dev/null
+        ports:
+        - name: brpc
+          containerPort: 5100
+        env:
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "1Gi"
+          limits:
+            cpu: "500m"
+            memory: "2Gi"
+        volumeMounts:
+        - name: re-log
+          mountPath: /opt/apache-doris/re/log
+        - name: fdb-cluster
+          mountPath: /etc/foundationdb
+          readOnly: true
+      volumes:
+      - name: re-log
+        emptyDir: {}
+      - name: fdb-cluster
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: doris-recycler
+  namespace: doris
+  labels:
+    app: doris-recycler
+spec:
+  type: ClusterIP
+  selector:
+    app: doris-recycler
+  ports:
+  - name: brpc
+    port: 5100
+    targetPort: 5100

@@ -1,0 +1,17 @@
+{
+  "instance_id": "1369466725",
+  "vault": {
+    "name": "minio_vault",
+    "type": "S3",
+    "properties": {
+      "s3.endpoint": "http://minio.doris.svc.cluster.local:9000",
+      "s3.region": "us-east-1",
+      "s3.bucket": "doris",
+      "s3.root.path": "doris",
+      "s3.access_key": "minioadmin",
+      "s3.secret_key": "minioadmin",
+      "s3.use_path_style": "true",
+      "s3.enable_ssl": "false"
+    }
+  }
+}

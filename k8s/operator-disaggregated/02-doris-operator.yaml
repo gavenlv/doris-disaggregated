@@ -1,0 +1,77 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: doris-operator
+  namespace: doris
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: doris-operator-role
+rules:
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["*"]
+- apiGroups: [""]
+  resources: ["pods", "pods/log", "services", "endpoints", "configmaps", "secrets", "persistentvolumeclaims", "events"]
+  verbs: ["*"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "statefulsets"]
+  verbs: ["*"]
+- apiGroups: ["policy"]
+  resources: ["poddisruptionbudgets"]
+  verbs: ["*"]
+- apiGroups: ["disaggregated.cluster.doris.com"]
+  resources: ["dorisdisaggregatedclusters", "dorisdisaggregatedclusters/status", "dorisdisaggregatedclusters/finalizers"]
+  verbs: ["*"]
+- apiGroups: ["cluster.doris.com"]
+  resources: ["dorisclusters", "dorisclusters/status", "dorisclusters/finalizers"]
+  verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: doris-operator-rolebinding
+subjects:
+- kind: ServiceAccount
+  name: doris-operator
+  namespace: doris
+roleRef:
+  kind: ClusterRole
+  name: doris-operator-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: doris-operator
+  namespace: doris
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: doris-operator
+  template:
+    metadata:
+      labels:
+        app: doris-operator
+    spec:
+      serviceAccountName: doris-operator
+      containers:
+      - name: doris-operator
+        image: apache/doris:operator-25.8.0
+        imagePullPolicy: Never
+        args:
+        - --leader-elect
+        env:
+        - name: WATCH_NAMESPACE
+          value: "doris"
+        - name: START_DISAGGREGATED_OPERATOR
+          value: "true"
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi

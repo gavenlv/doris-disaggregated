@@ -1,0 +1,169 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: doris-fe
+  namespace: doris
+  labels:
+    app: doris-fe
+spec:
+  serviceName: doris-fe-headless
+  replicas: 1
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: doris-fe
+  template:
+    metadata:
+      labels:
+        app: doris-fe
+    spec:
+      terminationGracePeriodSeconds: 60
+      initContainers:
+      - name: wait-for-ms
+        image: busybox:1.36
+        command: ['sh', '-c', 'until nc -z doris-ms 8080; do echo waiting for meta-service; sleep 2; done']
+      containers:
+      - name: frontend
+        image: apache/doris:fe-4.0.4
+        imagePullPolicy: Never
+        command:
+        - /bin/bash
+        - -c
+        - |
+          FE_CONF=/opt/apache-doris/fe/conf/fe.conf
+          if [ ! -f ${FE_CONF} ]; then
+            FE_CONF=/opt/doris/fe/conf/fe.conf
+          fi
+          echo "" >> ${FE_CONF}
+          echo "meta_service_endpoint = doris-ms:8080" >> ${FE_CONF}
+          echo "cloud_unique_id = 1:doris_instance:cloud_unique_id_fe00" >> ${FE_CONF}
+          echo "run_mode = disagg" >> ${FE_CONF}
+
+          POD_IP=${POD_IP:-$(hostname -i)}
+          MS_URL="http://doris-ms:8080"
+          TOKEN="greedisgood9999"
+
+          echo "=== Registering FE with Meta Service (IP: ${POD_IP}) ==="
+          for i in $(seq 1 30); do
+            if curl -sf "${MS_URL}/MetaService/http/get_instance?instance_id=doris_instance&token=${TOKEN}" > /dev/null 2>&1; then
+              echo "Instance exists, registering FE node..."
+              curl -sf -X POST "${MS_URL}/MetaService/http/add_cluster?token=${TOKEN}" \
+                -H "Content-Type: application/json" \
+                -d "{\"instance_id\":\"doris_instance\",\"cluster\":{\"type\":\"SQL\",\"cluster_name\":\"RESERVED_CLUSTER_NAME_FOR_SQL_SERVER\",\"cluster_id\":\"RESERVED_CLUSTER_ID_FOR_SQL_SERVER\",\"nodes\":[{\"cloud_unique_id\":\"1:doris_instance:cloud_unique_id_fe00\",\"ip\":\"${POD_IP}\",\"edit_log_port\":9010,\"node_type\":\"FE_MASTER\"}]}}" \
+                && echo "FE registered successfully" && break
+              echo "Registration attempt ${i} failed, retrying..."
+            else
+              echo "Waiting for instance to be created (attempt ${i})..."
+            fi
+            sleep 5
+          done
+
+          echo "Starting FE..."
+          FE_BIN=/opt/apache-doris/fe/bin/start_fe.sh
+          if [ ! -f ${FE_BIN} ]; then
+            FE_BIN=/opt/doris/fe/bin/start_fe.sh
+          fi
+          ${FE_BIN} --daemon
+          sleep 10
+          FE_LOG=/opt/apache-doris/fe/log/fe.log
+          if [ ! -f ${FE_LOG} ]; then
+            FE_LOG=/opt/doris/fe/log/fe.log
+          fi
+          tail -f ${FE_LOG}
+        ports:
+        - name: http
+          containerPort: 8030
+        - name: rpc
+          containerPort: 9020
+        - name: query
+          containerPort: 9030
+        - name: edit-log
+          containerPort: 9010
+        env:
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "2Gi"
+          limits:
+            cpu: "1"
+            memory: "4Gi"
+        volumeMounts:
+        - name: fe-meta
+          mountPath: /opt/apache-doris/fe/doris-meta
+        - name: fe-log
+          mountPath: /opt/apache-doris/fe/log
+        livenessProbe:
+          exec:
+            command:
+            - /bin/bash
+            - -c
+            - pgrep -f "DorisFE" > /dev/null || exit 1
+          initialDelaySeconds: 120
+          periodSeconds: 15
+          timeoutSeconds: 10
+        readinessProbe:
+          exec:
+            command:
+            - /bin/bash
+            - -c
+            - pgrep -f "DorisFE" > /dev/null || exit 1
+          initialDelaySeconds: 90
+          periodSeconds: 10
+          timeoutSeconds: 5
+      volumes:
+      - name: fe-meta
+        emptyDir: {}
+      - name: fe-log
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: doris-fe-headless
+  namespace: doris
+  labels:
+    app: doris-fe
+spec:
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    app: doris-fe
+  ports:
+  - name: http
+    port: 8030
+    targetPort: 8030
+  - name: rpc
+    port: 9020
+    targetPort: 9020
+  - name: query
+    port: 9030
+    targetPort: 9030
+  - name: edit-log
+    port: 9010
+    targetPort: 9010
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: doris-fe
+  namespace: doris
+  labels:
+    app: doris-fe
+spec:
+  type: ClusterIP
+  selector:
+    app: doris-fe
+  ports:
+  - name: http
+    port: 8030
+    targetPort: 8030
+  - name: rpc
+    port: 9020
+    targetPort: 9020
+  - name: query
+    port: 9030
+    targetPort: 9030

@@ -1,0 +1,9 @@
+# FoundationDB Cluster ConfigMap for Meta Service
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fdb-cluster-config
+  namespace: doris
+data:
+  fdb.cluster: |
+    doris:doris@foundationdb.doris.svc.cluster.local:4500

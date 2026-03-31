@@ -1,0 +1,132 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: foundationdb
+  namespace: doris
+spec:
+  serviceName: foundationdb
+  replicas: 1
+  selector:
+    matchLabels:
+      app: foundationdb
+  template:
+    metadata:
+      labels:
+        app: foundationdb
+    spec:
+      containers:
+      - name: foundationdb
+        image: foundationdb/foundationdb:7.3.69
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 4500
+          name: main
+        - containerPort: 4501
+          name: tls
+        command:
+        - /bin/bash
+        - -c
+        - |
+          set -e
+          FDB_DIR=/var/lib/foundationdb
+          mkdir -p ${FDB_DIR}/data ${FDB_DIR}/logs
+
+          POD_IP=$(hostname -i)
+          CLUSTER_FILE="${FDB_DIR}/fdb.cluster"
+          echo "doris:doris@${POD_IP}:4500" > ${CLUSTER_FILE}
+
+          if [ ! -f ${FDB_DIR}/data/.initialized ]; then
+            echo "Starting fdbserver for initialization..."
+            fdbserver \
+              --cluster_file ${CLUSTER_FILE} \
+              --datadir ${FDB_DIR}/data \
+              --logdir ${FDB_DIR}/logs \
+              --public_address ${POD_IP}:4500 \
+              --listen_address 0.0.0.0:4500 \
+              --locality_zoneid "$(hostname)" \
+              --locality_machineid "$(hostname)" &
+            FDB_PID=$!
+
+            echo "Waiting for fdbserver to start (PID: ${FDB_PID})..."
+            for i in $(seq 1 30); do
+              if fdbcli --exec "get \xff\xff" --cluster_file ${CLUSTER_FILE} --timeout 3 2>/dev/null; then
+                echo "fdbserver is responding!"
+                break
+              fi
+              if ! kill -0 ${FDB_PID} 2>/dev/null; then
+                echo "fdbserver crashed!"
+                exit 1
+              fi
+              echo "Waiting for fdbserver... (attempt ${i})"
+              sleep 2
+            done
+
+            echo "Configuring new single ssd cluster..."
+            fdbcli --exec "configure new single ssd" --cluster_file ${CLUSTER_FILE} --timeout 120
+            touch ${FDB_DIR}/data/.initialized
+            echo "FDB cluster configured successfully!"
+
+            echo "Stopping fdbserver for clean restart..."
+            kill ${FDB_PID}
+            wait ${FDB_PID} 2>/dev/null || true
+            sleep 2
+          else
+            echo "FDB already initialized, starting..."
+          fi
+
+          echo "Starting fdbserver..."
+          exec fdbserver \
+            --cluster_file ${CLUSTER_FILE} \
+            --datadir ${FDB_DIR}/data \
+            --logdir ${FDB_DIR}/logs \
+            --public_address ${POD_IP}:4500 \
+            --listen_address 0.0.0.0:4500 \
+            --locality_zoneid "$(hostname)" \
+            --locality_machineid "$(hostname)"
+        volumeMounts:
+        - name: fdb-data
+          mountPath: /var/lib/foundationdb
+        livenessProbe:
+          exec:
+            command:
+            - /bin/bash
+            - -c
+            - "fdbcli --exec 'get \xff\xff' --cluster_file /var/lib/foundationdb/fdb.cluster --timeout 3 2>/dev/null"
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          exec:
+            command:
+            - /bin/bash
+            - -c
+            - "fdbcli --exec 'get \xff\xff' --cluster_file /var/lib/foundationdb/fdb.cluster --timeout 3 2>/dev/null"
+          initialDelaySeconds: 45
+          periodSeconds: 15
+          timeoutSeconds: 10
+          failureThreshold: 3
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "512Mi"
+          limits:
+            cpu: "1"
+            memory: "1Gi"
+      volumes:
+      - name: fdb-data
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: foundationdb
+  namespace: doris
+spec:
+  selector:
+    app: foundationdb
+  ports:
+  - name: main
+    port: 4500
+    targetPort: 4500
+  clusterIP: None

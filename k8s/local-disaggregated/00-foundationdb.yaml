@@ -1,0 +1,110 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: doris
+  labels:
+    name: doris
+    app.kubernetes.io/name: apache-doris-disaggregated
+    app.kubernetes.io/version: "4.0.4"
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: foundationdb
+  namespace: doris
+  labels:
+    app: foundationdb
+spec:
+  serviceName: foundationdb
+  replicas: 1
+  selector:
+    matchLabels:
+      app: foundationdb
+  template:
+    metadata:
+      labels:
+        app: foundationdb
+    spec:
+      containers:
+      - name: foundationdb
+        image: foundationdb/foundationdb:7.3.69
+        env:
+        - name: FDB_NETWORK_OPTION_TRACE_LOGGING
+          value: "1"
+        command:
+        - /bin/bash
+        - -c
+        - |
+          FDB_CLUSTER_FILE=/var/fdb/fdb.cluster
+          POD_IP=$(hostname -i)
+          echo "doris:doris@${POD_IP}:4500" > ${FDB_CLUSTER_FILE}
+          chmod 644 ${FDB_CLUSTER_FILE}
+          echo "Starting FDB with cluster file: $(cat ${FDB_CLUSTER_FILE})"
+          fdbserver --cluster-file ${FDB_CLUSTER_FILE} --public-address ${POD_IP}:4500 --datadir /var/lib/foundationdb/data --logdir /var/log/foundationdb &
+          sleep 5
+          fdbcli --exec "configure new single ssd" 2>/dev/null || echo "Database may already exist"
+          fdbcli --exec "status minimal"
+          wait
+        ports:
+        - name: client
+          containerPort: 4500
+        - name: cluster
+          containerPort: 4501
+        volumeMounts:
+        - name: fdb-data
+          mountPath: /var/lib/foundationdb/data
+        - name: fdb-log
+          mountPath: /var/log/foundationdb
+        - name: fdb-cluster-file
+          mountPath: /var/fdb
+        livenessProbe:
+          exec:
+            command:
+            - fdbcli
+            - --exec
+            - status minimal
+          initialDelaySeconds: 30
+          periodSeconds: 15
+          timeoutSeconds: 10
+        readinessProbe:
+          exec:
+            command:
+            - fdbcli
+            - --exec
+            - status minimal
+          initialDelaySeconds: 20
+          periodSeconds: 10
+          timeoutSeconds: 5
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "1Gi"
+          limits:
+            cpu: "1"
+            memory: "2Gi"
+      volumes:
+      - name: fdb-data
+        emptyDir: {}
+      - name: fdb-log
+        emptyDir: {}
+      - name: fdb-cluster-file
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: foundationdb
+  namespace: doris
+  labels:
+    app: foundationdb
+spec:
+  type: ClusterIP
+  selector:
+    app: foundationdb
+  ports:
+  - name: client
+    port: 4500
+    targetPort: 4500
+  - name: cluster
+    port: 4501
+    targetPort: 4501

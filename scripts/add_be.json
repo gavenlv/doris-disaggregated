@@ -1,0 +1,1 @@
+{"instance_id":"doris_instance","cluster":{"type":"COMPUTE","cluster_name":"default_compute_cluster","cluster_id":"10001","nodes":[{"cloud_unique_id":"1:doris_instance:cloud_unique_id_be00","ip":"10.1.0.229","heartbeat_port":9050,"be_port":9060,"brpc_port":8060}]}}

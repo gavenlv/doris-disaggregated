@@ -1,0 +1,1 @@
+{"instance_id":"doris_instance","cluster":{"type":"SQL","cluster_name":"RESERVED_CLUSTER_NAME_FOR_SQL_SERVER","cluster_id":"RESERVED_CLUSTER_ID_FOR_SQL_SERVER","nodes":[{"cloud_unique_id":"1:doris_instance:cloud_unique_id_fe00","ip":"10.1.0.228","edit_log_port":9010,"node_type":"FE_MASTER","heartbeat_port":9050}]}}
